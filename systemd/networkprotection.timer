@@ -2,7 +2,7 @@
 Description=Run Network Protection after boot and every 24 hours
 
 [Timer]
-OnBootSec=2min
+OnActiveSec=2min
 OnUnitInactiveSec=24h
 AccuracySec=5min
 RandomizedDelaySec=10min

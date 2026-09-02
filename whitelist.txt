@@ -1,0 +1,4 @@
+# One IPv4/IPv6 address or CIDR per line. Examples:
+# 203.0.113.10
+# 198.51.100.0/24
+# 2001:db8::/32

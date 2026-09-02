@@ -4,7 +4,8 @@ set -Eeuo pipefail
 
 TEST_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly TEST_DIR
-readonly PROJECT_DIR="$(dirname -- "$TEST_DIR")"
+PROJECT_DIR="$(dirname -- "$TEST_DIR")"
+readonly PROJECT_DIR
 output_file="$(mktemp /tmp/networkprotection-geoip-test.XXXXXX)"
 readonly output_file
 trap 'rm -f -- "$output_file"' EXIT

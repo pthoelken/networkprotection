@@ -1,161 +1,223 @@
 # Network Protection
 
-Dieses Projekt pflegt eine externe IPv4-Blockliste, eine lokale Custom-Liste,
-konfigurierbare Ländersperren und Spamhaus ASN-DROP in einem idempotenten
-systemd-Dienst. Ein Timer startet den Dienst nach dem Boot und danach alle
-24 Stunden.
+Network Protection maintains several source-IP blocklists in dedicated Linux
+`ipset` sets and applies them through isolated `iptables`/`ip6tables` chains. A
+systemd timer refreshes the data after boot and every 24 hours.
 
-## Firewall-Aufbau
+The managed sources are:
 
-Das Skript erstellt ausschließlich:
+- the blocklist.de IPv4 bad-IP list plus a local custom blacklist;
+- configurable country blocks generated from DB-IP Country Lite;
+- current IPv4 and IPv6 prefixes announced by Spamhaus ASN-DROP networks;
+- a local IPv4/IPv6 whitelist that overrides all three managed block sources.
 
-- das IP-Set `networkprotection_v4` für blocklist.de und lokale Einträge,
-- das IP-Set `networkprotection_geo_v4` für die gesperrten Länder,
-- die IP-Sets `networkprotection_asn_v4` und `networkprotection_asn_v6` für
-  Spamhaus ASN-DROP,
-- die eigene Chain `NETWORKPROTECTION` in `iptables` und `ip6tables`,
-- je einen kommentierten Sprung von `INPUT` nach `NETWORKPROTECTION`.
+## Supported systems
 
-Die Sprünge werden bei jedem Lauf an Position 1 gesetzt. Vorhandene Regeln
-rutschen nur gemeinsam nach unten; Inhalt und relative Reihenfolge bleiben
-unverändert. Das Skript leert keine fremde Chain, stoppt weder Fail2ban noch
-CrowdSec und schreibt kein globales `iptables-save`-Abbild.
+The package targets systemd-based Debian and Ubuntu systems using `iptables`
+and `ipset`. It installs these runtime dependencies automatically: `bash`,
+`curl`, `gzip`, `ipset`, `iptables`, `python3`, and `util-linux`.
 
-Innerhalb der IPv4-Chain gilt diese Reihenfolge:
+## Install or upgrade with one command
 
-1. externe und lokale IPv4-Blockliste über `ipset`;
-2. Länderblockliste über ein zweites `ipset`;
-3. Spamhaus ASN-DROP über das IPv4-ASN-Set.
+The latest successful `main` pipeline publishes a stable artifact name. On a
+public GitLab project, install or upgrade it with this Bash one-liner:
 
-Die IPv6-Chain prüft das IPv6-ASN-Set. Alle Regeln verwenden ausschließlich den
-Standard-Matcher `-m set --match-set ... src`. `xt_geoip`, xtables-addons,
-DKMS, Kernel-Header und eine MOK-Einschreibung sind nicht erforderlich. Secure
-Boot bleibt davon unberührt.
-
-## GeoIP-Verarbeitung
-
-Der Dienst lädt monatlich die kostenlose DB-IP Country Lite CSV-Datei. Der
-mitgelieferte Python-Konverter filtert die in `BLOCK_COUNTRIES` konfigurierten
-Länder, verwirft IPv6-Zeilen und wandelt IPv4-Start-/Endbereiche mit der
-Python-Standardbibliothek in zusammengefasste CIDR-Netze um.
-
-Neue Sets werden vollständig im Hintergrund aufgebaut und anschließend per
-`ipset swap` atomar aktiviert. Download-, Dekompressions-, CSV- oder
-Importfehler lassen das zuvor aktive Set unverändert. Die Konvertierung schlägt
-auch fehl, wenn für eines der konfigurierten Länderkürzel keine IPv4-Daten
-gefunden wurden.
-
-## Spamhaus ASN-DROP
-
-Bei jedem Lauf lädt der Dienst die aktuelle JSON-Lines-Datei von:
-
-```text
-https://www.spamhaus.org/drop/asndrop.json
+```bash
+curl -fsSL 'https://gitlab.com/pthoelken/networkprotection/-/jobs/artifacts/main/raw/dist/networkprotection_all.deb?job=build-deb' -o /tmp/networkprotection.deb && sudo apt-get install -y /tmp/networkprotection.deb
 ```
 
-Die Metadaten und jede ASN werden validiert. Anschließend löst der
-Python-Konverter jede ASN über den RIPEstat-Endpunkt `announced-prefixes` auf:
+Change the GitLab host or namespace in the URL when using a fork or a
+self-hosted GitLab instance. A private project also requires an authenticated
+download. After installation, inspect the version and start the first update
+manually:
 
-```text
-https://stat.ripe.net/data/announced-prefixes/data.json?resource=AS<ASN>
-```
-
-Alle Antworten müssen erfolgreich und vollständig sein. Die gelieferten
-öffentlichen IPv4- und IPv6-Präfixe werden mit der Python-Standardbibliothek
-validiert, dedupliziert und zusammengefasst. Erst danach befüllt das Skript
-beide temporären Sets. Die finalen IPv4- und IPv6-Sets werden einzeln per
-`ipset swap` aktiviert; schlägt der zweite Tausch wider Erwarten fehl, wird der
-erste zurückgetauscht. Download-, API-, JSON-, Validierungs- oder Importfehler
-lassen ein bereits vorhandenes Set-Paar unverändert.
-
-Standardmäßig laufen vier RIPEstat-Abfragen parallel. Der Wert ist auf maximal
-acht begrenzt. Da jede ASN bei jedem Dienstlauf erneut aufgelöst wird, werden
-sowohl Änderungen an Spamhaus ASN-DROP als auch an den angekündigten
-BGP-Präfixen beim nächsten Lauf übernommen.
-
-## Voraussetzungen
-
-Auf Debian/Ubuntu werden benötigt:
-
-```sh
-apt install iptables ipset curl util-linux gzip python3
-```
-
-`install.sh` prüft alle Pakete über `dpkg-query` und installiert nur fehlende
-Pakete.
-
-## Installation und erster Test
-
-```sh
-cd /pfad/zu/networkprotection
-sudo ./install.sh
+```bash
 /opt/networkprotection/networkprotection.sh --version
 sudo systemctl start networkprotection.service
+sudo systemctl status networkprotection.service
 ```
 
-Die Installation entfernt eine von älteren Projektversionen angelegte
-`/etc/modules-load.d/networkprotection.conf`, sofern sie ausschließlich
-`xt_geoip` enthält. Installierte xtables-addons-/DKMS-Pakete werden nicht
-automatisch deinstalliert, da sie noch von anderen Anwendungen verwendet werden
-könnten.
+Run the same one-liner for every later upgrade. The package supports systems
+previously installed with `install.sh` as well as older package versions:
 
-Den ersten Lauf in einer bestehenden SSH-Sitzung prüfen:
+- executables below `/opt/networkprotection` are updated;
+- `/etc/networkprotection/networkprotection.conf` is never overwritten;
+- the custom blacklist and whitelist are never overwritten;
+- missing configuration files are created from the current defaults;
+- unchanged legacy systemd units from `install.sh` are migrated to the
+  package-owned units, while locally customized overrides are preserved;
+- the timer remains enabled across upgrades.
 
-```sh
-sudo systemctl status networkprotection.service
+The Debian package uses epoch `1`, so version `1:1.0.0` also upgrades cleanly
+from any legacy date-based package version such as `2026.07.27-6`.
+
+The package does not immediately run a firewall refresh during installation,
+which makes upgrades safer over SSH. The timer schedules the first refresh two
+minutes after it is activated, or it can be triggered with the command above.
+
+## IP and CIDR whitelist
+
+The whitelist is enabled by default and stored at:
+
+```text
+/etc/networkprotection/whitelist.txt
+```
+
+Add one IPv4 address, IPv6 address, or CIDR per line. Blank lines and comments
+are allowed. Plain addresses are treated as `/32` for IPv4 or `/128` for IPv6.
+
+```text
+# Keep China blocked, except for this exact host
+203.0.113.10/32
+
+# Allow a complete partner network
+198.51.100.0/24
+
+# IPv6 is supported as well
+2001:db8:1234::/48
+```
+
+For example, `BLOCK_COUNTRIES="CN,RU,IR"` continues to block all generated
+Chinese networks except a matching address or subnet in the whitelist. The
+same exception also takes precedence over the bad-IP and ASN-DROP sets.
+
+Whitelist entries create a `RETURN` rule at the beginning of the dedicated
+Network Protection chain. This is intentional: matching traffic skips only
+this project's block rules and then continues through the remaining `INPUT`
+rules. It is not globally accepted and can still be blocked by Fail2ban,
+CrowdSec, or another firewall rule.
+
+After editing the file, apply and verify it:
+
+```bash
+sudo systemctl start networkprotection.service
+sudo ipset list networkprotection_allow_v4
+sudo ipset list networkprotection_allow_v6
+```
+
+The complete whitelist is validated before activation. Networks are
+canonicalized, deduplicated, and collapsed. Both new sets are prepared before
+they replace the active IPv4/IPv6 pair. If validation or loading fails, the
+previous valid whitelist stays active.
+
+## Configuration
+
+The main configuration is:
+
+```text
+/etc/networkprotection/networkprotection.conf
+```
+
+Common settings are:
+
+```bash
+ENABLE_WHITELIST=yes
+WHITELIST_FILE="/etc/networkprotection/whitelist.txt"
+
+ENABLE_IP_BLOCKLIST=yes
+BLOCKLIST_URL="https://lists.blocklist.de/lists/all.txt"
+CUSTOM_LIST_FILE="/etc/networkprotection/custom-blacklist.txt"
+MIN_BLOCKLIST_ENTRIES=1000
+
+ENABLE_GEO_BLOCKLIST=yes
+BLOCK_COUNTRIES="CN,RU,IR,KP,BY,BR,IN,ID,VN,PK,BD,TH"
+
+ENABLE_ASN_DROP=yes
+ASN_DROP_RIPESTAT_WORKERS=4
+```
+
+New settings have safe defaults in the executable, so an existing configuration
+does not need to be replaced during an upgrade. To disable the exception layer,
+set `ENABLE_WHITELIST=no`.
+
+## Firewall behavior
+
+The service owns only its named ipsets, the `NETWORKPROTECTION` chain in each
+address family, and a commented jump from `INPUT` to that chain. It does not
+flush foreign chains, stop other security tools, or write a global
+`iptables-save` snapshot.
+
+The IPv4 chain is evaluated in this order:
+
+1. whitelist: `RETURN`;
+2. external and local bad-IP list: `DROP`;
+3. GeoIP country list: `DROP`;
+4. Spamhaus ASN-DROP IPv4 list: `DROP`.
+
+The IPv6 chain evaluates the IPv6 whitelist before Spamhaus ASN-DROP IPv6. New
+block and allow sets are populated in the background and activated with
+`ipset swap`, avoiding an empty protection window during routine updates.
+
+The service uses the standard `-m set --match-set ... src` matcher. It does not
+require `xt_geoip`, xtables-addons, DKMS, kernel headers, or MOK enrollment.
+
+## Verify an installation
+
+Perform the first run in an existing SSH session and check the resulting rules:
+
+```bash
 sudo journalctl -u networkprotection.service -n 100 --no-pager
 sudo iptables -L INPUT -n --line-numbers
 sudo iptables -L NETWORKPROTECTION -n -v
 sudo ip6tables -L INPUT -n --line-numbers
 sudo ip6tables -L NETWORKPROTECTION -n -v
-sudo ipset list networkprotection_v4 | head
-sudo ipset list networkprotection_geo_v4 | head
-sudo ipset list networkprotection_asn_v4 | head
-sudo ipset list networkprotection_asn_v6 | head
 sudo systemctl list-timers networkprotection.timer
 ```
 
-Erwartet werden in der IPv4-Chain bis zu drei kommentierte DROP-Regeln und in
-der IPv6-Chain die ASN-DROP-Regel. In beiden `INPUT`-Chains steht der Sprung mit
-dem Kommentar `networkprotection: entry` an Position 1.
+The jump marked `networkprotection: entry` should be at position 1. Whitelist
+rules must appear before every Network Protection `DROP` rule.
 
-## Konfiguration
+## Build the Debian package locally
 
-Konfiguration und lokale Liste liegen nach der Installation hier:
+On Debian or Ubuntu:
+
+```bash
+sudo apt-get install -y dpkg-dev
+./packaging/build-deb.sh
+sudo apt-get install -y ./dist/networkprotection_$(cat VERSION)_all.deb
+```
+
+The build produces a versioned package and the stable
+`dist/networkprotection_all.deb` artifact used by GitLab CI.
+
+## GitLab CI and versioning
+
+The project follows Semantic Versioning. `VERSION` is the single source of
+truth, releases use tags such as `v1.0.0`, and user-visible changes are recorded
+in `CHANGELOG.md`.
+
+Release procedure:
+
+1. update `VERSION` to `MAJOR.MINOR.PATCH`;
+2. update `CHANGELOG.md`;
+3. commit and push the change;
+4. create and push the matching `vMAJOR.MINOR.PATCH` tag.
+
+The GitLab pipeline runs ShellCheck, Python unit tests, mocked firewall tests,
+and then builds the `.deb`. A tag pipeline fails when the Git tag and `VERSION`
+do not match. Both package names are retained as non-expiring job artifacts:
 
 ```text
-/etc/networkprotection/networkprotection.conf
-/etc/networkprotection/custom-blacklist.txt
+dist/networkprotection_1.0.0_all.deb
+dist/networkprotection_all.deb
 ```
 
-Wichtige Einstellungen:
+## Install from a source checkout
 
-```sh
-ENABLE_IP_BLOCKLIST=yes
-ENABLE_GEO_BLOCKLIST=yes
-ENABLE_ASN_DROP=yes
-BLOCK_COUNTRIES="CN,RU,IR,KP,BY,BR,IN,ID,VN,PK,BD,TH"
-IPSET_NAME="networkprotection_v4"
-GEOIP_SET_NAME="networkprotection_geo_v4"
-ASN_DROP_V4_SET_NAME="networkprotection_asn_v4"
-ASN_DROP_V6_SET_NAME="networkprotection_asn_v6"
-ASN_DROP_RIPESTAT_WORKERS=4
+The legacy installer remains available for development or migration testing:
+
+```bash
+sudo ./install.sh
 ```
 
-Bestehende Konfigurationen aus früheren Versionen dürfen die nicht mehr
-verwendeten Variablen `GEOIP_DB_DIR`, `GEOIP_DOWNLOADER` und `GEOIP_BUILDER`
-noch enthalten; sie werden ignoriert. Neue ASN-DROP-Einstellungen sowie
-`GEOIP_SET_NAME` und `GEOIP_DB_URL` erhalten automatisch sichere Standardwerte,
-wenn sie in einer bestehenden Konfiguration fehlen.
+It preserves existing configuration, blacklist, and whitelist files. Production
+systems should use the Debian package so future upgrades are tracked by `dpkg`.
 
-Nach Änderungen:
+## Run the test suite
 
-```sh
-sudo systemctl start networkprotection.service
+```bash
+python3 -m unittest discover -s tests -p 'test_*.py' -v
+tests/test_geoip_to_cidrs.sh
+tests/test_networkprotection_asndrop.sh
+tests/test_networkprotection_whitelist.sh
 ```
-
-## Migration
-
-Nach einem erfolgreichen Test alte Cronjobs für `geo-blacklister.sh` und
-`ip-blacklister.sh` deaktivieren. Alte `BLACKLIST`-Regeln und Sets werden nicht
-automatisch entfernt.

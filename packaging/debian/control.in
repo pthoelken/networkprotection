@@ -1,0 +1,11 @@
+Package: networkprotection
+Version: @DEBIAN_VERSION@
+Section: net
+Priority: optional
+Architecture: all
+Maintainer: pthoelken <pthoelken@users.noreply.github.com>
+Depends: bash, curl, gzip, ipset, iptables, python3, systemd, util-linux
+Description: ipset-based network blocklists for Debian systems
+ Network Protection maintains external IPv4, GeoIP, and Spamhaus ASN-DROP
+ blocklists in dedicated ipsets. A local IPv4/IPv6 CIDR whitelist can bypass
+ only the block rules managed by this package.

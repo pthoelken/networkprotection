@@ -41,6 +41,8 @@ install -d -m 0755 "$INSTALL_DIR" "$CONFIG_DIR"
 install -m 0755 "$SOURCE_DIR/networkprotection.sh" "$INSTALL_DIR/networkprotection.sh"
 install -m 0755 "$SOURCE_DIR/geoip_to_cidrs.py" "$INSTALL_DIR/geoip_to_cidrs.py"
 install -m 0755 "$SOURCE_DIR/asndrop_to_prefixes.py" "$INSTALL_DIR/asndrop_to_prefixes.py"
+install -m 0755 "$SOURCE_DIR/normalize_cidrs.py" "$INSTALL_DIR/normalize_cidrs.py"
+install -m 0644 "$SOURCE_DIR/VERSION" "$INSTALL_DIR/VERSION"
 echo "Installierte Network-Protection-Version: $("$INSTALL_DIR/networkprotection.sh" --version)"
 
 if [[ ! -e "$CONFIG_DIR/networkprotection.conf" ]]; then
@@ -52,6 +54,11 @@ if [[ ! -e "$CONFIG_DIR/custom-blacklist.txt" ]]; then
     install -m 0644 "$SOURCE_DIR/custom-blacklist.txt" "$CONFIG_DIR/custom-blacklist.txt"
 else
     echo "Bestehende Custom-Liste bleibt erhalten: $CONFIG_DIR/custom-blacklist.txt"
+fi
+if [[ ! -e "$CONFIG_DIR/whitelist.txt" ]]; then
+    install -m 0644 "$SOURCE_DIR/whitelist.txt" "$CONFIG_DIR/whitelist.txt"
+else
+    echo "Bestehende Whitelist bleibt erhalten: $CONFIG_DIR/whitelist.txt"
 fi
 
 install -m 0644 "$SOURCE_DIR/systemd/networkprotection.service" /etc/systemd/system/networkprotection.service

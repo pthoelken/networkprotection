@@ -4,9 +4,10 @@ set -Eeuo pipefail
 
 TEST_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly TEST_DIR
-readonly PROJECT_DIR="$(dirname -- "$TEST_DIR")"
+PROJECT_DIR="$(dirname -- "$TEST_DIR")"
+readonly PROJECT_DIR
 
-# shellcheck source=../networkprotection.sh
+# shellcheck source=networkprotection.sh
 source "$PROJECT_DIR/networkprotection.sh"
 
 date() {
@@ -72,6 +73,12 @@ place_entry_rule_first ipt IPv4
 place_entry_rule_first ip6t IPv6
 
 grep -Fq \
+    "iptables -w 30 -A NETWORKPROTECTION -m set --match-set networkprotection_allow_v4 src -m comment --comment networkprotection: IPv4 whitelist -j RETURN" \
+    "$MOCK_FIREWALL_LOG"
+grep -Fq \
+    "ip6tables -w 30 -A NETWORKPROTECTION -m set --match-set networkprotection_allow_v6 src -m comment --comment networkprotection: IPv6 whitelist -j RETURN" \
+    "$MOCK_FIREWALL_LOG"
+grep -Fq \
     "iptables -w 30 -A NETWORKPROTECTION -m set --match-set networkprotection_asn_v4 src" \
     "$MOCK_FIREWALL_LOG"
 grep -Fq \
@@ -83,5 +90,12 @@ grep -Fq \
 grep -Fq \
     "ip6tables -w 30 -I INPUT 1 -m comment --comment networkprotection: entry -j NETWORKPROTECTION" \
     "$MOCK_FIREWALL_LOG"
+
+whitelist_rule_line="$(grep -Fn "networkprotection_allow_v4 src" "$MOCK_FIREWALL_LOG" | cut -d: -f1)"
+block_rule_line="$(grep -Fn "networkprotection_asn_v4 src" "$MOCK_FIREWALL_LOG" | cut -d: -f1)"
+(( whitelist_rule_line < block_rule_line )) || {
+    echo "Whitelist-Regel steht nicht vor der ASN-DROP-Regel." >&2
+    exit 1
+}
 
 echo "ASN-DROP-ipset- und Firewalltest erfolgreich."

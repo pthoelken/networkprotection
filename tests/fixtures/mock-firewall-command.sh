@@ -17,6 +17,12 @@ if [[ "$command_name" == "ipset" &&
     exit 1
 fi
 
+if [[ "$command_name" == "ipset" &&
+    "${MOCK_FAIL_WHITELIST_IPV6_SWAP:-no}" == "yes" &&
+    "$*" == "swap networkprotection_allow_v6 networkprotection_allow_v6_new" ]]; then
+    exit 1
+fi
+
 for argument in "$@"; do
     if [[ "$argument" == "-C" ]]; then
         exit 1

@@ -4,10 +4,15 @@ set -Eeuo pipefail
 
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
-readonly NETWORKPROTECTION_VERSION="2026.07.27-6"
-
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly SCRIPT_DIR
+VERSION_FILE="$SCRIPT_DIR/VERSION"
+if [[ -r "$VERSION_FILE" ]]; then
+    IFS= read -r NETWORKPROTECTION_VERSION < "$VERSION_FILE"
+else
+    NETWORKPROTECTION_VERSION="unknown"
+fi
+readonly NETWORKPROTECTION_VERSION
 CONFIG_FILE="${NETWORKPROTECTION_CONFIG:-/etc/networkprotection/networkprotection.conf}"
 if [[ ! -r "$CONFIG_FILE" ]]; then
     CONFIG_FILE="$SCRIPT_DIR/networkprotection.conf"
@@ -19,19 +24,24 @@ source "$CONFIG_FILE"
 : "${ENABLE_IP_BLOCKLIST:=yes}"
 : "${ENABLE_GEO_BLOCKLIST:=yes}"
 : "${ENABLE_ASN_DROP:=yes}"
+: "${ENABLE_WHITELIST:=yes}"
 : "${BLOCKLIST_URL:=https://lists.blocklist.de/lists/all.txt}"
 : "${CUSTOM_LIST_FILE:=/etc/networkprotection/custom-blacklist.txt}"
+: "${WHITELIST_FILE:=/etc/networkprotection/whitelist.txt}"
 : "${MIN_BLOCKLIST_ENTRIES:=1000}"
 : "${BLOCK_COUNTRIES:=RU,IR,KR,BD}"
 : "${IPSET_NAME:=networkprotection_v4}"
 : "${GEOIP_SET_NAME:=networkprotection_geo_v4}"
 : "${ASN_DROP_V4_SET_NAME:=networkprotection_asn_v4}"
 : "${ASN_DROP_V6_SET_NAME:=networkprotection_asn_v6}"
+: "${WHITELIST_V4_SET_NAME:=networkprotection_allow_v4}"
+: "${WHITELIST_V6_SET_NAME:=networkprotection_allow_v6}"
 : "${GEOIP_DB_URL:=https://download.db-ip.com/free/dbip-country-lite-$(date +%Y-%m).csv.gz}"
 : "${GEOIP_CONVERTER:=$SCRIPT_DIR/geoip_to_cidrs.py}"
 : "${ASN_DROP_URL:=https://www.spamhaus.org/drop/asndrop.json}"
 : "${RIPESTAT_API_URL:=https://stat.ripe.net/data/announced-prefixes/data.json}"
 : "${ASN_DROP_CONVERTER:=$SCRIPT_DIR/asndrop_to_prefixes.py}"
+: "${WHITELIST_CONVERTER:=$SCRIPT_DIR/normalize_cidrs.py}"
 : "${MIN_ASN_DROP_ASNS:=100}"
 : "${ASN_DROP_RIPESTAT_WORKERS:=4}"
 : "${ASN_DROP_RIPESTAT_TIMEOUT:=30}"
@@ -44,7 +54,11 @@ readonly TEMP_SET_NAME="${IPSET_NAME}_new"
 readonly GEOIP_TEMP_SET_NAME="${GEOIP_SET_NAME}_new"
 readonly ASN_DROP_V4_TEMP_SET_NAME="${ASN_DROP_V4_SET_NAME}_new"
 readonly ASN_DROP_V6_TEMP_SET_NAME="${ASN_DROP_V6_SET_NAME}_new"
+readonly WHITELIST_V4_TEMP_SET_NAME="${WHITELIST_V4_SET_NAME}_new"
+readonly WHITELIST_V6_TEMP_SET_NAME="${WHITELIST_V6_SET_NAME}_new"
 readonly ENTRY_COMMENT="networkprotection: entry"
+readonly WHITELIST_V4_COMMENT="networkprotection: IPv4 whitelist"
+readonly WHITELIST_V6_COMMENT="networkprotection: IPv6 whitelist"
 readonly IP_COMMENT="networkprotection: IPv4 blocklist"
 readonly GEO_COMMENT="networkprotection: GeoIP blocklist"
 readonly ASN_DROP_V4_COMMENT="networkprotection: Spamhaus ASN-DROP IPv4"
@@ -95,6 +109,10 @@ validate_config() {
         die "Ungültiger ASN_DROP_V4_SET_NAME: $ASN_DROP_V4_SET_NAME"
     [[ "$ASN_DROP_V6_SET_NAME" =~ ^[A-Za-z0-9_.:-]{1,27}$ ]] || \
         die "Ungültiger ASN_DROP_V6_SET_NAME: $ASN_DROP_V6_SET_NAME"
+    [[ "$WHITELIST_V4_SET_NAME" =~ ^[A-Za-z0-9_.:-]{1,27}$ ]] || \
+        die "Ungültiger WHITELIST_V4_SET_NAME: $WHITELIST_V4_SET_NAME"
+    [[ "$WHITELIST_V6_SET_NAME" =~ ^[A-Za-z0-9_.:-]{1,27}$ ]] || \
+        die "Ungültiger WHITELIST_V6_SET_NAME: $WHITELIST_V6_SET_NAME"
     [[ "$IPSET_NAME" != "$GEOIP_SET_NAME" ]] || \
         die "IPSET_NAME und GEOIP_SET_NAME müssen verschieden sein."
     [[ "$IPSET_NAME" != "$ASN_DROP_V4_SET_NAME" ]] || \
@@ -107,19 +125,34 @@ validate_config() {
         die "GEOIP_SET_NAME und ASN_DROP_V6_SET_NAME müssen verschieden sein."
     [[ "$ASN_DROP_V4_SET_NAME" != "$ASN_DROP_V6_SET_NAME" ]] || \
         die "ASN-DROP-Setnamen müssen verschieden sein."
+    local -a all_set_names=(
+        "$IPSET_NAME" "$GEOIP_SET_NAME" "$ASN_DROP_V4_SET_NAME"
+        "$ASN_DROP_V6_SET_NAME" "$WHITELIST_V4_SET_NAME" "$WHITELIST_V6_SET_NAME"
+    )
+    local first_index second_index
+    for (( first_index = 0; first_index < ${#all_set_names[@]}; first_index++ )); do
+        for (( second_index = first_index + 1; second_index < ${#all_set_names[@]}; second_index++ )); do
+            [[ "${all_set_names[$first_index]}" != "${all_set_names[$second_index]}" ]] || \
+                die "Alle IP-Set-Namen müssen eindeutig sein: ${all_set_names[$first_index]}"
+        done
+    done
     [[ "$BLOCK_COUNTRIES" =~ ^[A-Za-z]{2}(,[A-Za-z]{2})*$ ]] || die "Ungültige Länderliste: $BLOCK_COUNTRIES"
     [[ "$MIN_BLOCKLIST_ENTRIES" =~ ^[0-9]+$ ]] || die "MIN_BLOCKLIST_ENTRIES muss numerisch sein."
-    [[ "$MIN_ASN_DROP_ASNS" =~ ^[0-9]+$ ]] && (( MIN_ASN_DROP_ASNS > 0 )) || \
+    if [[ ! "$MIN_ASN_DROP_ASNS" =~ ^[0-9]+$ ]] || (( MIN_ASN_DROP_ASNS <= 0 )); then
         die "MIN_ASN_DROP_ASNS muss eine positive Zahl sein."
-    [[ "$ASN_DROP_RIPESTAT_WORKERS" =~ ^[0-9]+$ ]] && \
-        (( ASN_DROP_RIPESTAT_WORKERS >= 1 && ASN_DROP_RIPESTAT_WORKERS <= 8 )) || \
+    fi
+    if [[ ! "$ASN_DROP_RIPESTAT_WORKERS" =~ ^[0-9]+$ ]] ||
+        (( ASN_DROP_RIPESTAT_WORKERS < 1 || ASN_DROP_RIPESTAT_WORKERS > 8 )); then
         die "ASN_DROP_RIPESTAT_WORKERS muss zwischen 1 und 8 liegen."
-    [[ "$ASN_DROP_RIPESTAT_TIMEOUT" =~ ^[0-9]+$ ]] && \
-        (( ASN_DROP_RIPESTAT_TIMEOUT > 0 )) || \
+    fi
+    if [[ ! "$ASN_DROP_RIPESTAT_TIMEOUT" =~ ^[0-9]+$ ]] ||
+        (( ASN_DROP_RIPESTAT_TIMEOUT <= 0 )); then
         die "ASN_DROP_RIPESTAT_TIMEOUT muss eine positive Zahl sein."
-    [[ "$ASN_DROP_RIPESTAT_RETRIES" =~ ^[0-9]+$ ]] && \
-        (( ASN_DROP_RIPESTAT_RETRIES > 0 )) || \
+    fi
+    if [[ ! "$ASN_DROP_RIPESTAT_RETRIES" =~ ^[0-9]+$ ]] ||
+        (( ASN_DROP_RIPESTAT_RETRIES <= 0 )); then
         die "ASN_DROP_RIPESTAT_RETRIES muss eine positive Zahl sein."
+    fi
     [[ "$ASN_DROP_URL" == https://* ]] || die "ASN_DROP_URL muss HTTPS verwenden."
     [[ "$RIPESTAT_API_URL" == https://* ]] || die "RIPESTAT_API_URL muss HTTPS verwenden."
 }
@@ -198,6 +231,45 @@ replace_asn_drop_ipsets() {
     ipset destroy "$ASN_DROP_V6_TEMP_SET_NAME"
 }
 
+replace_whitelist_ipsets() {
+    local ipv4_file="$1"
+    local ipv6_file="$2"
+
+    if ! prepare_ipset_from_file "$WHITELIST_V4_TEMP_SET_NAME" inet "$ipv4_file"; then
+        return 1
+    fi
+    if ! prepare_ipset_from_file "$WHITELIST_V6_TEMP_SET_NAME" inet6 "$ipv6_file"; then
+        ipset destroy "$WHITELIST_V4_TEMP_SET_NAME" 2>/dev/null || true
+        return 1
+    fi
+
+    if ! ipset create "$WHITELIST_V4_SET_NAME" hash:net family inet \
+        hashsize 65536 maxelem 1000000 -exist ||
+        ! ipset create "$WHITELIST_V6_SET_NAME" hash:net family inet6 \
+            hashsize 65536 maxelem 1000000 -exist; then
+        ipset destroy "$WHITELIST_V4_TEMP_SET_NAME" 2>/dev/null || true
+        ipset destroy "$WHITELIST_V6_TEMP_SET_NAME" 2>/dev/null || true
+        return 1
+    fi
+
+    if ! ipset swap "$WHITELIST_V4_SET_NAME" "$WHITELIST_V4_TEMP_SET_NAME"; then
+        ipset destroy "$WHITELIST_V4_TEMP_SET_NAME" 2>/dev/null || true
+        ipset destroy "$WHITELIST_V6_TEMP_SET_NAME" 2>/dev/null || true
+        return 1
+    fi
+    if ! ipset swap "$WHITELIST_V6_SET_NAME" "$WHITELIST_V6_TEMP_SET_NAME"; then
+        if ! ipset swap "$WHITELIST_V4_SET_NAME" "$WHITELIST_V4_TEMP_SET_NAME"; then
+            warn "IPv4-Whitelist konnte nach dem IPv6-Tauschfehler nicht zurückgesetzt werden."
+        fi
+        ipset destroy "$WHITELIST_V4_TEMP_SET_NAME" 2>/dev/null || true
+        ipset destroy "$WHITELIST_V6_TEMP_SET_NAME" 2>/dev/null || true
+        return 1
+    fi
+
+    ipset destroy "$WHITELIST_V4_TEMP_SET_NAME"
+    ipset destroy "$WHITELIST_V6_TEMP_SET_NAME"
+}
+
 download_file() {
     local url="$1"
     local destination="$2"
@@ -239,6 +311,36 @@ normalize_ipv4_lists() {
             if ($0 != "" && valid_ipv4($0)) print $0
         }
     ' "$@" | LC_ALL=C sort -u > "$destination"
+}
+
+update_whitelist_ipsets() {
+    local ipv4_file="$WORK_DIR/whitelist-ipv4.txt"
+    local ipv6_file="$WORK_DIR/whitelist-ipv6.txt"
+    local ipv4_count
+    local ipv6_count
+
+    [[ -x "$WHITELIST_CONVERTER" ]] || {
+        warn "Whitelist-Konverter fehlt: $WHITELIST_CONVERTER"
+        return 1
+    }
+    [[ -r "$WHITELIST_FILE" ]] || {
+        warn "Whitelist ist nicht lesbar: $WHITELIST_FILE"
+        return 1
+    }
+    if ! "$WHITELIST_CONVERTER" "$WHITELIST_FILE" "$ipv4_file" "$ipv6_file"; then
+        warn "Whitelist enthält ungültige IP-Adressen oder CIDR-Netze."
+        return 1
+    fi
+
+    ipv4_count="$(wc -l < "$ipv4_file")"
+    ipv4_count="${ipv4_count//[[:space:]]/}"
+    ipv6_count="$(wc -l < "$ipv6_file")"
+    ipv6_count="${ipv6_count//[[:space:]]/}"
+    if ! replace_whitelist_ipsets "$ipv4_file" "$ipv6_file"; then
+        warn "Whitelist-IP-Sets konnten nicht atomar ausgetauscht werden."
+        return 1
+    fi
+    log "Whitelist atomar aktualisiert: $ipv4_count IPv4- und $ipv6_count IPv6-Netze"
 }
 
 update_ipset() {
@@ -373,6 +475,16 @@ configure_managed_chain() {
         return 2
     fi
 
+    # RETURN exempts the source only from this project's DROP rules. Processing
+    # then continues in INPUT, so other firewalls such as CrowdSec still apply.
+    if is_enabled "$ENABLE_WHITELIST" && ipset_exists "$WHITELIST_V4_SET_NAME"; then
+        if ! ipt -A "$CHAIN_NAME" -m set --match-set "$WHITELIST_V4_SET_NAME" src \
+            -m comment --comment "$WHITELIST_V4_COMMENT" -j RETURN; then
+            warn "IPv4-Whitelist-Regel konnte nicht geladen werden."
+            rules_failed=1
+        fi
+    fi
+
     if is_enabled "$ENABLE_IP_BLOCKLIST" && ipset list "$IPSET_NAME" >/dev/null 2>&1; then
         if ipt -A "$CHAIN_NAME" -m set --match-set "$IPSET_NAME" src \
             -m comment --comment "$IP_COMMENT" -j DROP; then
@@ -409,11 +521,20 @@ configure_managed_chain() {
 
 configure_managed_ipv6_chain() {
     local rules_added=0
+    local rules_failed=0
 
     ip6t -N "$CHAIN_NAME" 2>/dev/null || true
     if ! ip6t -F "$CHAIN_NAME"; then
         warn "IPv6-Chain $CHAIN_NAME konnte nicht vorbereitet werden."
         return 2
+    fi
+
+    if is_enabled "$ENABLE_WHITELIST" && ipset_exists "$WHITELIST_V6_SET_NAME"; then
+        if ! ip6t -A "$CHAIN_NAME" -m set --match-set "$WHITELIST_V6_SET_NAME" src \
+            -m comment --comment "$WHITELIST_V6_COMMENT" -j RETURN; then
+            warn "IPv6-Whitelist-Regel konnte nicht geladen werden."
+            rules_failed=1
+        fi
     fi
 
     if is_enabled "$ENABLE_ASN_DROP" && ipset_exists "$ASN_DROP_V6_SET_NAME"; then
@@ -422,10 +543,11 @@ configure_managed_ipv6_chain() {
             ((rules_added += 1))
         else
             warn "IPv6-ASN-DROP-Regel konnte nicht geladen werden."
-            return 2
+            rules_failed=1
         fi
     fi
 
+    (( rules_failed == 0 )) || return 2
     (( rules_added > 0 )) || return 1
 }
 
@@ -481,7 +603,8 @@ main() {
     require_command iptables
     require_command ip6tables
     require_command sort
-    if is_enabled "$ENABLE_GEO_BLOCKLIST" || is_enabled "$ENABLE_ASN_DROP"; then
+    if is_enabled "$ENABLE_WHITELIST" || is_enabled "$ENABLE_GEO_BLOCKLIST" || \
+        is_enabled "$ENABLE_ASN_DROP"; then
         require_command python3
     fi
     if is_enabled "$ENABLE_GEO_BLOCKLIST"; then
@@ -493,6 +616,18 @@ main() {
     exec 9>"$LOCK_FILE"
     flock -n 9 || die "Eine weitere Instanz läuft bereits."
     WORK_DIR="$(mktemp -d /tmp/networkprotection.XXXXXX)"
+
+    if is_enabled "$ENABLE_WHITELIST"; then
+        if ! update_whitelist_ipsets; then
+            if ipset_exists "$WHITELIST_V4_SET_NAME" &&
+                ipset_exists "$WHITELIST_V6_SET_NAME"; then
+                warn "Verwende die vorhandenen Whitelist-IP-Sets weiter."
+            else
+                warn "Kein vollständiges Paar nutzbarer Whitelist-IP-Sets vorhanden."
+                failed=1
+            fi
+        fi
+    fi
 
     if is_enabled "$ENABLE_IP_BLOCKLIST"; then
         update_ipset || failed=1

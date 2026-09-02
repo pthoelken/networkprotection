@@ -1,0 +1,61 @@
+#!/bin/sh
+
+set -eu
+
+CONFIG_DIR=/etc/networkprotection
+DEFAULTS_DIR=/usr/share/networkprotection/defaults
+
+install -d -m 0755 "$CONFIG_DIR"
+
+install_default() {
+    source_file="$1"
+    destination_file="$2"
+    if [ ! -e "$destination_file" ]; then
+        install -m 0644 "$source_file" "$destination_file"
+    fi
+}
+
+# These files are deliberately created only when absent. This preserves files
+# from both older Debian packages and the historical install.sh installation.
+install_default "$DEFAULTS_DIR/networkprotection.conf" \
+    "$CONFIG_DIR/networkprotection.conf"
+install_default "$DEFAULTS_DIR/custom-blacklist.txt" \
+    "$CONFIG_DIR/custom-blacklist.txt"
+install_default "$DEFAULTS_DIR/whitelist.txt" \
+    "$CONFIG_DIR/whitelist.txt"
+
+# install.sh used /etc/systemd/system. Remove an unmodified legacy copy so the
+# package-owned unit in /lib takes over; customized overrides remain untouched.
+for unit in networkprotection.service networkprotection.timer; do
+    legacy_unit="/etc/systemd/system/$unit"
+    packaged_unit="/lib/systemd/system/$unit"
+    if [ -f "$legacy_unit" ]; then
+        legacy_checksum="$(sha256sum "$legacy_unit" | cut -d' ' -f1)"
+        case "$unit:$legacy_checksum" in
+            networkprotection.service:303264bbf6bc97beb2fbfd31c7d7b11cc75e16dfd5bb9b8dd4b8709a427a6220|\
+            networkprotection.timer:58b9afbc3725959f8f1073353d95efeeda9a422d3d13cc25462710b38375ce98|\
+            networkprotection.timer:5eb0abf1941823a8e64fe84a11b907ba44733a7bc274306d3dddb26f132bd445)
+                rm -f "$legacy_unit"
+                ;;
+            *)
+                if cmp -s "$legacy_unit" "$packaged_unit"; then
+                    rm -f "$legacy_unit"
+                fi
+                ;;
+        esac
+    fi
+done
+
+if [ -f /etc/modules-load.d/networkprotection.conf ] &&
+    [ "$(tr -d '[:space:]' < /etc/modules-load.d/networkprotection.conf)" = "xt_geoip" ]; then
+    rm -f /etc/modules-load.d/networkprotection.conf
+fi
+
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload
+    if ! systemctl enable --now networkprotection.timer >/dev/null; then
+        echo "Warning: networkprotection.timer could not be enabled." >&2
+    fi
+fi
+
+exit 0
