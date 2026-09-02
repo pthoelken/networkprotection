@@ -19,17 +19,16 @@ and `ipset`. It installs these runtime dependencies automatically: `bash`,
 
 ## Install or upgrade with one command
 
-The latest successful `main` pipeline publishes a stable artifact name. On a
-public GitLab project, install or upgrade it with this Bash one-liner:
+Each version tag publishes a GitHub Release with a stable package name. Install
+or upgrade the latest release with this Bash one-liner:
 
 ```bash
-curl -fsSL 'https://gitlab.com/pthoelken/networkprotection/-/jobs/artifacts/main/raw/dist/networkprotection_all.deb?job=build-deb' -o /tmp/networkprotection.deb && sudo apt-get install -y /tmp/networkprotection.deb
+curl -fsSL 'https://github.com/pthoelken/networkprotection/releases/latest/download/networkprotection_all.deb' -o /tmp/networkprotection.deb && sudo apt-get install -y /tmp/networkprotection.deb
 ```
 
-Change the GitLab host or namespace in the URL when using a fork or a
-self-hosted GitLab instance. A private project also requires an authenticated
-download. After installation, inspect the version and start the first update
-manually:
+Change the GitHub owner or repository in the URL when using a fork. Private
+repositories require an authenticated download. After installation, inspect the
+version and start the first update manually:
 
 ```bash
 /opt/networkprotection/networkprotection.sh --version
@@ -178,9 +177,9 @@ sudo apt-get install -y ./dist/networkprotection_$(cat VERSION)_all.deb
 ```
 
 The build produces a versioned package and the stable
-`dist/networkprotection_all.deb` artifact used by GitLab CI.
+`dist/networkprotection_all.deb` artifact used by GitHub Actions and Releases.
 
-## GitLab CI and versioning
+## GitHub Actions and versioning
 
 The project follows Semantic Versioning. `VERSION` is the single source of
 truth, releases use tags such as `v1.0.0`, and user-visible changes are recorded
@@ -193,9 +192,14 @@ Release procedure:
 3. commit and push the change;
 4. create and push the matching `vMAJOR.MINOR.PATCH` tag.
 
-The GitLab pipeline runs ShellCheck, Python unit tests, mocked firewall tests,
-and then builds the `.deb`. A tag pipeline fails when the Git tag and `VERSION`
-do not match. Both package names are retained as non-expiring job artifacts:
+The GitHub Actions workflow runs on pushes to `main`, pull requests, version
+tags, and manual dispatches. It runs ShellCheck, Python unit tests, mocked
+firewall tests, builds the `.deb`, and verifies an upgrade-style installation.
+A tag workflow fails when the Git tag and `VERSION` do not match.
+
+Every workflow run uploads both package names as Actions artifacts. Matching
+version tags additionally create a GitHub Release and upload the same files as
+release assets; the stable release asset powers the installation one-liner:
 
 ```text
 dist/networkprotection_1.0.0_all.deb

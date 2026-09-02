@@ -1,0 +1,108 @@
+name: Test and build Debian package
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    container: debian:bookworm-slim
+    steps:
+      - name: Install test tools
+        run: |
+          apt-get update
+          apt-get install --yes git python3 shellcheck
+
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Run ShellCheck
+        run: >-
+          shellcheck -x install.sh networkprotection.sh packaging/build-deb.sh
+          packaging/debian/postinst packaging/debian/prerm packaging/debian/postrm
+          tests/*.sh
+
+      - name: Run Python unit tests
+        run: >-
+          python3 -m unittest discover --start-directory tests
+          --pattern 'test_*.py' --verbose
+
+      - name: Run mocked firewall tests
+        run: |
+          tests/test_geoip_to_cidrs.sh
+          tests/test_networkprotection_asndrop.sh
+          tests/test_networkprotection_whitelist.sh
+
+  package:
+    name: Build and verify package
+    needs: test
+    runs-on: ubuntu-latest
+    container: debian:bookworm-slim
+    permissions:
+      contents: write
+    steps:
+      - name: Install package tools
+        run: |
+          apt-get update
+          apt-get install --yes dpkg-dev gh git
+
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build Debian package
+        run: packaging/build-deb.sh
+
+      - name: Inspect package
+        run: |
+          dpkg-deb --info "dist/networkprotection_$(cat VERSION)_all.deb"
+          dpkg-deb --contents "dist/networkprotection_$(cat VERSION)_all.deb"
+
+      - name: Verify upgrade-style installation
+        run: |
+          install -d -m 0755 /etc/networkprotection /etc/systemd/system
+          printf '%s\n' 'LOCAL_CONFIG_MUST_SURVIVE=yes' > /etc/networkprotection/networkprotection.conf
+          printf '%s\n' '198.51.100.7/32' > /etc/networkprotection/whitelist.txt
+          install -m 0644 systemd/networkprotection.service /etc/systemd/system/networkprotection.service
+          install -m 0644 systemd/networkprotection.timer /etc/systemd/system/networkprotection.timer
+          apt-get install --yes "./dist/networkprotection_$(cat VERSION)_all.deb"
+          grep -Fxq 'LOCAL_CONFIG_MUST_SURVIVE=yes' /etc/networkprotection/networkprotection.conf
+          grep -Fxq '198.51.100.7/32' /etc/networkprotection/whitelist.txt
+          test ! -e /etc/systemd/system/networkprotection.service
+          test ! -e /etc/systemd/system/networkprotection.timer
+          test "$(/opt/networkprotection/networkprotection.sh --version)" = "$(cat VERSION)"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: networkprotection-deb-${{ github.sha }}
+          path: |
+            dist/networkprotection_*_all.deb
+            dist/networkprotection_all.deb
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          version="$(cat VERSION)"
+          tag="${GITHUB_REF_NAME}"
+          versioned_package="dist/networkprotection_${version}_all.deb"
+          stable_package="dist/networkprotection_all.deb"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "$versioned_package" "$stable_package" --clobber
+          else
+            gh release create "$tag" "$versioned_package" "$stable_package" \
+              --generate-notes --title "$tag"
+          fi

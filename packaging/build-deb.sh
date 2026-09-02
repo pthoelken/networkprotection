@@ -13,9 +13,11 @@ readonly OUTPUT_DIR="${OUTPUT_DIR:-$PROJECT_DIR/dist}"
     echo "VERSION is not semantic versioning compatible: $VERSION" >&2
     exit 1
 }
-if [[ -n "${CI_COMMIT_TAG:-}" && "$CI_COMMIT_TAG" != "v$VERSION" ]]; then
-    echo "Git tag $CI_COMMIT_TAG does not match VERSION (expected v$VERSION)." >&2
-    exit 1
+if [[ "${GITHUB_REF_TYPE:-}" == "tag" ]]; then
+    if [[ "${GITHUB_REF_NAME:-}" != "v$VERSION" ]]; then
+        echo "Git tag ${GITHUB_REF_NAME:-unknown} does not match VERSION (expected v$VERSION)." >&2
+        exit 1
+    fi
 fi
 
 command -v dpkg-deb >/dev/null 2>&1 || {

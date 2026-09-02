@@ -8,4 +8,4 @@ Versioning and uses Git tags in the form `vMAJOR.MINOR.PATCH`.
 - Add an IPv4/IPv6 address and CIDR whitelist that bypasses the managed GeoIP,
   bad-IP, and ASN-DROP rules without bypassing other firewall rules.
 - Add upgrade-safe Debian packaging for existing script-based installations.
-- Add GitLab CI tests and versioned `.deb` artifacts.
+- Add GitHub Actions tests, versioned `.deb` artifacts, and tagged releases.
