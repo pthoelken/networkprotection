@@ -1,0 +1,20 @@
+[Unit]
+Description=Update Network Protection IP, GeoIP and Spamhaus ASN-DROP blocklists
+Wants=network-online.target
+After=network-online.target netfilter-persistent.service iptables.service nftables.service crowdsec.service fail2ban.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/networkprotection/networkprotection.sh
+User=root
+Group=root
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/run /tmp
+
+[Install]
+WantedBy=multi-user.target
